@@ -11,6 +11,7 @@ __pycache__/
 
 # Données générées (CSV)
 leads_laser.csv
+prospect_status.csv
 benchmark_llm_results.csv
 benchmark_llm_results_clean.csv
 benchmark_llm_summary.csv

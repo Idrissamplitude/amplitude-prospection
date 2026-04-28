@@ -24,13 +24,53 @@ KEYWORD = "laser"
 MAX_PROJECTS = 500
 
 KEYWORDS_WEIGHTS = {
+    # Très haute pertinence — cœur de métier Amplitude
     "femtosecond": 5,
     "ultrafast": 4,
+    "ultrashort": 4,
     "ablation": 4,
+    "multiphoton": 4,
+    # Haute pertinence
+    "two-photon": 3,
+    "biophotonics": 3,
     "photonics": 3,
+    "nonlinear": 3,
+    "pulsed laser": 3,
+    "fiber laser": 3,
+    # Pertinence moyenne
+    "lidar": 2,
+    "micromachining": 2,
     "laser": 2,
-    "optics": 1
+    "spectroscopy": 2,
+    "waveguide": 2,
+    # Pertinence faible
+    "optics": 1,
+    "optical": 1,
 }
+
+# Score max théorique : chaque mot-clé en titre (×2) + description (×1)
+SCORE_MAX = sum(w * 3 for w in KEYWORDS_WEIGHTS.values())
+SCORE_MIN_FILTER = 5
+
+
+def compute_score(title: str, description: str) -> tuple:
+    """Titre vaut 2× la description. Description complète utilisée (non tronquée)."""
+    title_lower = title.lower()
+    desc_lower = description.lower()
+    score = 0
+    matched = []
+
+    for kw, weight in KEYWORDS_WEIGHTS.items():
+        kw_score = 0
+        if kw in title_lower:
+            kw_score += weight * 2
+        if kw in desc_lower:
+            kw_score += weight
+        if kw_score > 0:
+            score += kw_score
+            matched.append(kw)
+
+    return score, matched
 
 # ─── COLLECTE NSF ─────────────────────────────────────────────────────────────
 def collect_nsf():
@@ -76,8 +116,7 @@ def collect_nsf():
 
         title = award.get("title", "") or ""
         description = award.get("abstractText", "") or ""
-        text = (title + " " + description).lower()
-        score = sum(w for kw, w in KEYWORDS_WEIGHTS.items() if kw in text)
+        score, matched = compute_score(title, description)
 
         budget = award.get("fundsObligatedAmt", None)
         if budget == 0:
@@ -92,7 +131,7 @@ def collect_nsf():
             "contact_name": f"{award.get('piFirstName', '') or ''} {award.get('piLastName', '') or ''}".strip(),
             "contact_email": award.get("piEmail", "") or "",
             "score": score,
-            "keywords_matched": str([kw for kw in KEYWORDS_WEIGHTS if kw in text]),
+            "keywords_matched": str(matched),
             "description": description[:300],
             "end_date": exp_date,
             "link": f"https://www.nsf.gov/awardsearch/showAward?AWD_ID={award.get('id', '')}" if award.get("id") else ""
@@ -104,7 +143,7 @@ def collect_nsf():
         return df
 
     df["budget_usd"] = pd.to_numeric(df["budget_usd"], errors="coerce")
-    return df[df["score"] >= 5]
+    return df[df["score"] >= SCORE_MIN_FILTER]
 
 # ─── COLLECTE NIH ─────────────────────────────────────────────────────────────
 def collect_nih():
@@ -118,7 +157,7 @@ def collect_nih():
                 "advanced_text_search": {
                     "operator": "or",
                     "search_field": "all",
-                    "search_text": "femtosecond laser ultrafast ablation photonics"
+                    "search_text": "femtosecond laser ultrafast ablation photonics ultrashort multiphoton biophotonics nonlinear pulsed fiber lidar micromachining"
                 }
             },
             "offset": offset,
@@ -159,9 +198,8 @@ def collect_nih():
     for project in all_projects:
         try:
             title = project.get("project_title", "") or ""
-            description = (project.get("abstract_text", "") or "")[:300]
-            text = (title + " " + description).lower()
-            score = sum(w for kw, w in KEYWORDS_WEIGHTS.items() if kw in text)
+            description = project.get("abstract_text", "") or ""
+            score, matched = compute_score(title, description)
 
             pis = project.get("principal_investigators", [])
             contact_name = ""
@@ -184,8 +222,8 @@ def collect_nih():
                 "contact_name": contact_name,
                 "contact_email": "",
                 "score": score,
-                "keywords_matched": str([kw for kw in KEYWORDS_WEIGHTS if kw in text]),
-                "description": description,
+                "keywords_matched": str(matched),
+                "description": description[:300],
                 "end_date": (project.get("project_end_date", "") or "")[:10],
                 "link": f"https://reporter.nih.gov/project-details/{project_num}" if project_num else ""
             })
@@ -199,7 +237,7 @@ def collect_nih():
         return df
 
     df["budget_usd"] = pd.to_numeric(df["budget_usd"], errors="coerce")
-    return df[df["score"] >= 5]
+    return df[df["score"] >= SCORE_MIN_FILTER]
 
 # ─── COLLECTE CORDIS ──────────────────────────────────────────────────────────
 def collect_cordis():
@@ -227,8 +265,7 @@ def collect_cordis():
     for project in all_projects:
         title = project.get("title", "") or ""
         description = project.get("teaser", "") or ""
-        text = (title + " " + description).lower()
-        score = sum(w for kw, w in KEYWORDS_WEIGHTS.items() if kw in text)
+        score, matched = compute_score(title, description)
         ref = project.get("reference", "") or ""
 
         rows.append({
@@ -240,7 +277,7 @@ def collect_cordis():
             "contact_name": "",
             "contact_email": "",
             "score": score,
-            "keywords_matched": str([kw for kw in KEYWORDS_WEIGHTS if kw in text]),
+            "keywords_matched": str(matched),
             "description": description[:300],
             "end_date": project.get("endDate", "") or "",
             "link": f"https://cordis.europa.eu/project/id/{ref}" if ref else ""
@@ -251,7 +288,7 @@ def collect_cordis():
     if df.empty:
         return df
 
-    return df[df["score"] >= 5]
+    return df[df["score"] >= SCORE_MIN_FILTER]
 
 # ─── PIPELINE GLOBAL ──────────────────────────────────────────────────────────
 def run_pipeline():
@@ -271,6 +308,46 @@ def run_pipeline():
 
     df_total.to_csv("leads_laser.csv", index=False)
     return df_total
+
+# ─── STATUTS PROSPECTS ───────────────────────────────────────────────────────
+STATUS_FILE = "prospect_status.csv"
+STATUTS = ["—", "À contacter", "Contacté", "Pas intéressé", "À recontacter"]
+
+
+
+def load_status() -> dict:
+    if not os.path.exists(STATUS_FILE):
+        return {}
+    try:
+        df = pd.read_csv(STATUS_FILE)
+        return {
+            str(row["link"]): {"status": str(row["status"]), "note": str(row.get("note", "") or "")}
+            for _, row in df.iterrows()
+        }
+    except Exception:
+        return {}
+
+
+def save_status(link: str, title: str, status: str, note: str):
+    if os.path.exists(STATUS_FILE):
+        df = pd.read_csv(STATUS_FILE)
+    else:
+        df = pd.DataFrame(columns=["link", "title", "status", "note", "updated_at"])
+
+    df = df[df["link"] != link]
+
+    if status != "—":
+        new_row = pd.DataFrame([{
+            "link": link,
+            "title": title,
+            "status": status,
+            "note": note,
+            "updated_at": datetime.today().strftime("%Y-%m-%d %H:%M")
+        }])
+        df = pd.concat([df, new_row], ignore_index=True)
+
+    df.to_csv(STATUS_FILE, index=False)
+
 
 # ─── CHARGEMENT DONNÉES ───────────────────────────────────────────────────────
 @st.cache_data
@@ -389,48 +466,79 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
     st.divider()
 
-    # ─── FILTRES ──────────────────────────────────────────────────────────────
-    st.subheader("🎛️ Filtres")
+    # ─── FILTRES & TRI (expander) ─────────────────────────────────────────────
+    with st.expander("🎛️ Filtres & Tri", expanded=False):
+        max_score = int(df_base["score"].max()) if len(df_base) > 0 else 15
 
-    max_score = int(df_base["score"].max()) if len(df_base) > 0 else 15
+        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
 
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        with col_f1:
+            score_min = st.slider(
+                "Score minimum",
+                0,
+                max_score,
+                5,
+                key=f"{chat_key}_score_min"
+            )
 
-    with col_f1:
-        score_min = st.slider(
-            "Score minimum",
-            0,
-            max_score,
-            5,
-            key=f"{chat_key}_score_min"
-        )
+        with col_f2:
+            budget_range = st.slider(
+                "Budget ($)",
+                0,
+                15_000_000,
+                (0, 15_000_000),
+                100_000,
+                format="$%d",
+                key=f"{chat_key}_budget"
+            )
 
-    with col_f2:
-        budget_range = st.slider(
-            "Budget ($)",
-            0,
-            15_000_000,
-            (0, 15_000_000),
-            100_000,
-            format="$%d",
-            key=f"{chat_key}_budget"
-        )
+        with col_f3:
+            email_only = st.checkbox(
+                "Email uniquement",
+                value=False,
+                key=f"{chat_key}_email"
+            )
 
-    with col_f3:
-        email_only = st.checkbox(
-            "Email uniquement",
-            value=False,
-            key=f"{chat_key}_email"
-        )
+        with col_f4:
+            budget_only = st.checkbox(
+                "Budget uniquement",
+                value=False,
+                key=f"{chat_key}_budget_only"
+            )
 
-    with col_f4:
-        budget_only = st.checkbox(
-            "Budget uniquement",
-            value=False,
-            key=f"{chat_key}_budget_only"
-        )
+        col_f5, col_s1, col_s2 = st.columns(3)
+
+        with col_f5:
+            statut_filter = st.multiselect(
+                "Filtrer par statut",
+                STATUTS[1:],
+                default=[],
+                key=f"{chat_key}_statut_filter"
+            )
+
+        with col_s1:
+            sort_by = st.selectbox(
+                "Trier par",
+                ["Score", "Budget", "Date de fin"],
+                index=0,
+                key=f"{chat_key}_sort_by"
+            )
+
+        with col_s2:
+            sort_order = st.selectbox(
+                "Ordre",
+                ["Décroissant ↓", "Croissant ↑"],
+                index=0,
+                key=f"{chat_key}_sort_order"
+            )
+
+    statuses = load_status()
 
     filtered = df_base[df_base["score"] >= score_min].copy()
+    filtered["statut"] = filtered["link"].map(lambda l: statuses.get(l, {}).get("status", "—"))
+
+    if statut_filter:
+        filtered = filtered[filtered["statut"].isin(statut_filter)]
 
     if email_only:
         filtered = filtered[filtered["contact_email"] != ""]
@@ -444,37 +552,14 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
         ((budget_numeric >= budget_range[0]) & (budget_numeric <= budget_range[1]))
     ]
 
-    # ─── TRI ──────────────────────────────────────────────────────────────────
-    st.subheader("🔃 Tri")
-
-    col_s1, col_s2 = st.columns(2)
-
-    with col_s1:
-        sort_by = st.selectbox(
-            "Trier par",
-            ["Score", "Budget", "Date de fin"],
-            index=0,
-            key=f"{chat_key}_sort_by"
-        )
-
-    with col_s2:
-        sort_order = st.selectbox(
-            "Ordre",
-            ["Décroissant ↓", "Croissant ↑"],
-            index=0,
-            key=f"{chat_key}_sort_order"
-        )
-
     ascending = sort_order == "Croissant ↑"
 
     if sort_by == "Score":
         filtered = filtered.sort_values("score", ascending=ascending)
-
     elif sort_by == "Budget":
         filtered["_budget_sort"] = pd.to_numeric(filtered["budget_usd"], errors="coerce")
         filtered = filtered.sort_values("_budget_sort", ascending=ascending, na_position="last")
         filtered = filtered.drop(columns=["_budget_sort"])
-
     elif sort_by == "Date de fin":
         filtered["_date_sort"] = pd.to_datetime(filtered["end_date"], errors="coerce")
         filtered = filtered.sort_values("_date_sort", ascending=ascending, na_position="last")
@@ -486,11 +571,38 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
     st.caption(f"**{len(filtered)} prospects** correspondent aux filtres")
     st.divider()
 
+    # ─── TOP 5 CARTES ─────────────────────────────────────────────────────────
+    st.subheader("🏆 Top 5 prospects")
+
+    top5 = filtered.head(5) if not filtered.empty else pd.DataFrame()
+
+    if not top5.empty:
+        cols = st.columns(min(len(top5), 5))
+        for col, (_, row) in zip(cols, top5.iterrows()):
+            with col:
+                with st.container(border=True):
+                    score_val = int(row["score"])
+                    budget = row.get("budget_usd")
+                    budget_str = f"${int(float(budget)):,}" if pd.notna(budget) and budget != "" else "—"
+                    statut_val = row.get("statut", "—")
+                    st.markdown(f"**{row['source']}** · {row['country']}")
+                    st.markdown(f"_{row['title'][:60]}..._" if len(row['title']) > 60 else f"_{row['title']}_")
+                    st.caption(row["organization"][:40] if row["organization"] else "—")
+                    m1, m2 = st.columns(2)
+                    m1.metric("Score", score_val)
+                    m2.metric("Budget", budget_str)
+                    if statut_val != "—":
+                        st.caption(f"📌 {statut_val}")
+    else:
+        st.info("Aucun prospect à afficher.")
+
+    st.divider()
+
     # ─── TABLEAU ──────────────────────────────────────────────────────────────
     st.subheader("📋 Prospects qualifiés")
 
     display_cols = [
-        "source", "title", "organization", "country", "budget_usd",
+        "statut", "source", "title", "organization", "country", "budget_usd",
         "contact_name", "contact_email", "score", "keywords_matched",
         "end_date", "link"
     ]
@@ -500,6 +612,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
         use_container_width=True,
         height=400,
         column_config={
+            "statut": st.column_config.TextColumn("Statut"),
             "source": st.column_config.TextColumn("Source"),
             "title": st.column_config.TextColumn("Projet", width="large"),
             "organization": st.column_config.TextColumn("Organisation"),
@@ -507,7 +620,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             "budget_usd": st.column_config.NumberColumn("Budget ($)", format="$%d"),
             "contact_name": st.column_config.TextColumn("Contact"),
             "contact_email": st.column_config.TextColumn("Email"),
-            "score": st.column_config.ProgressColumn("Score", min_value=0, max_value=15),
+            "score": st.column_config.NumberColumn("Score"),
             "keywords_matched": st.column_config.TextColumn("Mots-clés"),
             "end_date": st.column_config.TextColumn("Fin projet"),
             "link": st.column_config.LinkColumn("Lien projet"),
@@ -582,7 +695,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             )
 
             st.markdown(f"**Fin projet :** {row['end_date'] or 'Non disponible'}")
-            st.markdown(f"**Score :** {int(row['score'])}/15")
+            st.markdown(f"**Score :** {int(row['score'])}")
             st.markdown(f"**Mots-clés :** {row['keywords_matched']}")
 
         with c2:
@@ -594,6 +707,36 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
         st.markdown("**Résumé du projet :**")
         st.info(row["description"])
+
+        st.divider()
+        st.markdown("**Statut commercial**")
+
+        prospect_key = row["link"] or row["title"]
+        current = statuses.get(prospect_key, {})
+        current_status = current.get("status", "—")
+        current_note = current.get("note", "")
+
+        s_col1, s_col2 = st.columns([1, 2])
+
+        with s_col1:
+            new_status = st.selectbox(
+                "Statut",
+                STATUTS,
+                index=STATUTS.index(current_status) if current_status in STATUTS else 0,
+                key=f"{chat_key}_status_{selected_idx}"
+            )
+
+        with s_col2:
+            new_note = st.text_input(
+                "Note",
+                value=current_note,
+                key=f"{chat_key}_note_{selected_idx}"
+            )
+
+        if st.button("Enregistrer le statut", key=f"{chat_key}_save_{selected_idx}"):
+            save_status(prospect_key, row["title"], new_status, new_note)
+            st.success("Statut enregistré.")
+            st.rerun()
 
     else:
         st.warning("Aucun prospect ne correspond aux filtres.")
