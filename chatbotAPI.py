@@ -28,13 +28,15 @@ def check_password():
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown("### Connexion")
-        pwd = st.text_input("Mot de passe", type="password", key="pwd_input")
-        if st.button("Se connecter", use_container_width=True):
-            if pwd == app_password:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Mot de passe incorrect.")
+        with st.form("login_form"):
+            pwd = st.text_input("Mot de passe", type="password")
+            submitted = st.form_submit_button("Se connecter", use_container_width=True)
+            if submitted:
+                if pwd == app_password:
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("Mot de passe incorrect.")
 
     return False
 
@@ -531,33 +533,16 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
                     key=f"{chat_key}_budget_only"
                 )
         else:
-            col_e1, col_e2 = st.columns(2)
-
-            with col_e1:
-                score_min = st.slider(
-                    "Score minimum",
-                    0,
-                    max_score,
-                    5,
-                    key=f"{chat_key}_score_min"
-                )
-
-            with col_e2:
-                available_countries = sorted(df_base["country"].dropna().unique().tolist())
-                available_countries = [c for c in available_countries if c]
-                country_filter = st.multiselect(
-                    "Filtrer par pays",
-                    available_countries,
-                    default=[],
-                    key=f"{chat_key}_country_filter"
-                )
-
+            score_min = st.slider(
+                "Score minimum",
+                0,
+                max_score,
+                5,
+                key=f"{chat_key}_score_min"
+            )
             email_only = False
             budget_only = False
             budget_range = (0, 15_000_000)
-
-        if show_budget_email:
-            country_filter = []
 
         col_f5, col_s1, col_s2 = st.columns(3)
 
@@ -602,9 +587,6 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
     if statut_filter:
         filtered = filtered[filtered["statut"].isin(statut_filter)]
-
-    if country_filter:
-        filtered = filtered[filtered["country"].isin(country_filter)]
 
     if show_budget_email:
         if email_only:
