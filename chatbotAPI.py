@@ -892,7 +892,7 @@ with col_header:
     st.caption("NSF + NIH + CORDIS — interfaces séparées")
 
 with col_logo:
-    logo_path = "LOGOS AMPLITUDE/Amplitude_RVB.png"
+    logo_path = "LOGOS AMPLITUDE/Amplitude-bis_Secondaire_RVB.png"
     if os.path.exists(logo_path):
         st.image(logo_path, width=160)
 
