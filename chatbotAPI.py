@@ -885,8 +885,16 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
     )
 
 # ─── INTERFACE PRINCIPALE ─────────────────────────────────────────────────────
-st.title("🔬 Laser Prospects — Prospection intelligente")
-st.caption("NSF + NIH + CORDIS — interfaces séparées")
+col_header, col_logo = st.columns([4, 1])
+
+with col_header:
+    st.title("🔬 Laser Prospects — Prospection intelligente")
+    st.caption("NSF + NIH + CORDIS — interfaces séparées")
+
+with col_logo:
+    logo_path = "LOGOS AMPLITUDE/Amplitude_RVB.png"
+    if os.path.exists(logo_path):
+        st.image(logo_path, width=160)
 
 col_refresh, col_info = st.columns([1, 4])
 
