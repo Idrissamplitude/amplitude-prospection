@@ -5,19 +5,43 @@ import time
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-import google.generativeai as genai
+import ollama
 
 st.set_page_config(page_title="Laser Prospects", page_icon="🔬", layout="wide")
 
 # ─── CONFIG API ───────────────────────────────────────────────────────────────
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# ─── AUTHENTIFICATION ─────────────────────────────────────────────────────────
+def check_password():
+    app_password = os.getenv("APP_PASSWORD", "")
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    if not app_password:
+        return True
 
-MODEL_NAME = "gemini-2.0-flash-lite"
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.title("🔬 Laser Prospects")
+    st.markdown("---")
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("### Connexion")
+        pwd = st.text_input("Mot de passe", type="password", key="pwd_input")
+        if st.button("Se connecter", use_container_width=True):
+            if pwd == app_password:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Mot de passe incorrect.")
+
+    return False
+
+if not check_password():
+    st.stop()
+
+OLLAMA_MODEL = "mistral"
 
 # ─── CONFIG PIPELINE ──────────────────────────────────────────────────────────
 KEYWORD = "laser"
@@ -30,6 +54,9 @@ KEYWORDS_WEIGHTS = {
     "ultrashort": 4,
     "ablation": 4,
     "multiphoton": 4,
+    "high energy": 4,
+    "laser based acceleration": 4,
+    "inertial confinement fusion": 4,
     # Haute pertinence
     "two-photon": 3,
     "biophotonics": 3,
@@ -132,7 +159,7 @@ def collect_nsf():
             "contact_email": award.get("piEmail", "") or "",
             "score": score,
             "keywords_matched": str(matched),
-            "description": description[:300],
+            "description": description,
             "end_date": exp_date,
             "link": f"https://www.nsf.gov/awardsearch/showAward?AWD_ID={award.get('id', '')}" if award.get("id") else ""
         })
@@ -157,7 +184,7 @@ def collect_nih():
                 "advanced_text_search": {
                     "operator": "or",
                     "search_field": "all",
-                    "search_text": "femtosecond laser ultrafast ablation photonics ultrashort multiphoton biophotonics nonlinear pulsed fiber lidar micromachining"
+                    "search_text": "femtosecond laser ultrafast ablation photonics ultrashort multiphoton biophotonics nonlinear pulsed fiber lidar micromachining high energy laser acceleration inertial confinement fusion"
                 }
             },
             "offset": offset,
@@ -223,7 +250,7 @@ def collect_nih():
                 "contact_email": "",
                 "score": score,
                 "keywords_matched": str(matched),
-                "description": description[:300],
+                "description": description,
                 "end_date": (project.get("project_end_date", "") or "")[:10],
                 "link": f"https://reporter.nih.gov/project-details/{project_num}" if project_num else ""
             })
@@ -266,19 +293,22 @@ def collect_cordis():
         title = project.get("title", "") or ""
         description = project.get("teaser", "") or ""
         score, matched = compute_score(title, description)
-        ref = project.get("reference", "") or ""
+        ref = project.get("relatedProjectReference", "") or project.get("reference", "") or ""
+
+        if not ref:
+            continue
 
         rows.append({
             "source": "CORDIS",
             "title": title,
-            "organization": project.get("acronym", ""),
-            "country": project.get("coordinatedIn", ""),
+            "organization": project.get("relatedProjectAcronym", "") or project.get("acronym", ""),
+            "country": "Europe (UE)",
             "budget_usd": None,
             "contact_name": "",
             "contact_email": "",
             "score": score,
             "keywords_matched": str(matched),
-            "description": description[:300],
+            "description": description,
             "end_date": project.get("endDate", "") or "",
             "link": f"https://cordis.europa.eu/project/id/{ref}" if ref else ""
         })
@@ -387,11 +417,8 @@ def dataframe_context(df: pd.DataFrame, max_rows: int = 40) -> str:
     safe_df = safe_df[cols].head(max_rows).fillna("")
     return safe_df.to_json(orient="records", force_ascii=False)
 
-# ─── CHATBOT GEMINI ───────────────────────────────────────────────────────────
-def call_gemini_chatbot(user_message: str, df: pd.DataFrame, history: list, interface_name: str):
-    if not GEMINI_API_KEY:
-        return "Clé API Gemini absente. Ajoute GEMINI_API_KEY dans le fichier .env."
-
+# ─── CHATBOT OLLAMA ───────────────────────────────────────────────────────────
+def call_ollama_chatbot(user_message: str, df: pd.DataFrame, history: list, interface_name: str):
     history_text = ""
 
     for msg in history[-10:]:
@@ -432,28 +459,18 @@ Question utilisateur :
 """.strip()
 
     try:
-        model = genai.GenerativeModel(MODEL_NAME)
-
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "temperature": 0.2,
-                "max_output_tokens": 400
-            }
+        response = ollama.chat(
+            model=OLLAMA_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.2}
         )
-
-        answer = response.text.strip() if hasattr(response, "text") else ""
-
-        if not answer:
-            return "Je n'ai pas pu générer de réponse."
-
-        return answer
+        return response["message"]["content"].strip()
 
     except Exception as e:
-        return f"Erreur Gemini : {e}"
+        return f"Erreur Ollama : {e}"
 
 # ─── COMPOSANT INTERFACE ──────────────────────────────────────────────────────
-def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_key: str, export_name: str):
+def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_key: str, export_name: str, show_budget_email: bool = True):
     st.subheader(interface_name)
 
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -467,44 +484,80 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
     st.divider()
 
     # ─── FILTRES & TRI (expander) ─────────────────────────────────────────────
+    search_query = st.text_input(
+        "🔎 Recherche libre (titre, description, organisation)",
+        value="",
+        placeholder="ex: photonics, Stanford, ablation...",
+        key=f"{chat_key}_search"
+    )
+
     with st.expander("🎛️ Filtres & Tri", expanded=False):
         max_score = int(df_base["score"].max()) if len(df_base) > 0 else 15
 
-        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        if show_budget_email:
+            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
 
-        with col_f1:
-            score_min = st.slider(
-                "Score minimum",
-                0,
-                max_score,
-                5,
-                key=f"{chat_key}_score_min"
-            )
+            with col_f1:
+                score_min = st.slider(
+                    "Score minimum",
+                    0,
+                    max_score,
+                    5,
+                    key=f"{chat_key}_score_min"
+                )
 
-        with col_f2:
-            budget_range = st.slider(
-                "Budget ($)",
-                0,
-                15_000_000,
-                (0, 15_000_000),
-                100_000,
-                format="$%d",
-                key=f"{chat_key}_budget"
-            )
+            with col_f2:
+                budget_range = st.slider(
+                    "Budget ($)",
+                    0,
+                    15_000_000,
+                    (0, 15_000_000),
+                    100_000,
+                    format="$%d",
+                    key=f"{chat_key}_budget"
+                )
 
-        with col_f3:
-            email_only = st.checkbox(
-                "Email uniquement",
-                value=False,
-                key=f"{chat_key}_email"
-            )
+            with col_f3:
+                email_only = st.checkbox(
+                    "Email uniquement",
+                    value=False,
+                    key=f"{chat_key}_email"
+                )
 
-        with col_f4:
-            budget_only = st.checkbox(
-                "Budget uniquement",
-                value=False,
-                key=f"{chat_key}_budget_only"
-            )
+            with col_f4:
+                budget_only = st.checkbox(
+                    "Budget uniquement",
+                    value=False,
+                    key=f"{chat_key}_budget_only"
+                )
+        else:
+            col_e1, col_e2 = st.columns(2)
+
+            with col_e1:
+                score_min = st.slider(
+                    "Score minimum",
+                    0,
+                    max_score,
+                    5,
+                    key=f"{chat_key}_score_min"
+                )
+
+            with col_e2:
+                available_countries = sorted(df_base["country"].dropna().unique().tolist())
+                available_countries = [c for c in available_countries if c]
+                country_filter = st.multiselect(
+                    "Filtrer par pays",
+                    available_countries,
+                    default=[],
+                    key=f"{chat_key}_country_filter"
+                )
+
+            email_only = False
+            budget_only = False
+            budget_range = (0, 15_000_000)
+
+        if show_budget_email:
+            country_filter = []
 
         col_f5, col_s1, col_s2 = st.columns(3)
 
@@ -517,9 +570,10 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             )
 
         with col_s1:
+            sort_options = ["Score", "Budget", "Date de fin"] if show_budget_email else ["Score", "Date de fin"]
             sort_by = st.selectbox(
                 "Trier par",
-                ["Score", "Budget", "Date de fin"],
+                sort_options,
                 index=0,
                 key=f"{chat_key}_sort_by"
             )
@@ -537,20 +591,33 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
     filtered = df_base[df_base["score"] >= score_min].copy()
     filtered["statut"] = filtered["link"].map(lambda l: statuses.get(l, {}).get("status", "—"))
 
+    if search_query.strip():
+        q = search_query.strip().lower()
+        mask = (
+            filtered["title"].str.lower().str.contains(q, na=False) |
+            filtered["description"].str.lower().str.contains(q, na=False) |
+            filtered["organization"].str.lower().str.contains(q, na=False)
+        )
+        filtered = filtered[mask]
+
     if statut_filter:
         filtered = filtered[filtered["statut"].isin(statut_filter)]
 
-    if email_only:
-        filtered = filtered[filtered["contact_email"] != ""]
+    if country_filter:
+        filtered = filtered[filtered["country"].isin(country_filter)]
 
-    if budget_only:
-        filtered = filtered[pd.to_numeric(filtered["budget_usd"], errors="coerce").notna()]
+    if show_budget_email:
+        if email_only:
+            filtered = filtered[filtered["contact_email"] != ""]
 
-    budget_numeric = pd.to_numeric(filtered["budget_usd"], errors="coerce")
-    filtered = filtered[
-        budget_numeric.isna() |
-        ((budget_numeric >= budget_range[0]) & (budget_numeric <= budget_range[1]))
-    ]
+        if budget_only:
+            filtered = filtered[pd.to_numeric(filtered["budget_usd"], errors="coerce").notna()]
+
+        budget_numeric = pd.to_numeric(filtered["budget_usd"], errors="coerce")
+        filtered = filtered[
+            budget_numeric.isna() |
+            ((budget_numeric >= budget_range[0]) & (budget_numeric <= budget_range[1]))
+        ]
 
     ascending = sort_order == "Croissant ↑"
 
@@ -582,15 +649,18 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             with col:
                 with st.container(border=True):
                     score_val = int(row["score"])
-                    budget = row.get("budget_usd")
-                    budget_str = f"${int(float(budget)):,}" if pd.notna(budget) and budget != "" else "—"
                     statut_val = row.get("statut", "—")
                     st.markdown(f"**{row['source']}** · {row['country']}")
                     st.markdown(f"_{row['title'][:60]}..._" if len(row['title']) > 60 else f"_{row['title']}_")
                     st.caption(row["organization"][:40] if row["organization"] else "—")
-                    m1, m2 = st.columns(2)
-                    m1.metric("Score", score_val)
-                    m2.metric("Budget", budget_str)
+                    if show_budget_email:
+                        budget = row.get("budget_usd")
+                        budget_str = f"${int(float(budget)):,}" if pd.notna(budget) and budget != "" else "—"
+                        m1, m2 = st.columns(2)
+                        m1.metric("Score", score_val)
+                        m2.metric("Budget", budget_str)
+                    else:
+                        st.metric("Score", score_val)
                     if statut_val != "—":
                         st.caption(f"📌 {statut_val}")
     else:
@@ -601,17 +671,13 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
     # ─── TABLEAU ──────────────────────────────────────────────────────────────
     st.subheader("📋 Prospects qualifiés")
 
-    display_cols = [
-        "statut", "source", "title", "organization", "country", "budget_usd",
-        "contact_name", "contact_email", "score", "keywords_matched",
-        "end_date", "link"
-    ]
-
-    st.dataframe(
-        filtered[display_cols],
-        use_container_width=True,
-        height=400,
-        column_config={
+    if show_budget_email:
+        display_cols = [
+            "statut", "source", "title", "organization", "country", "budget_usd",
+            "contact_name", "contact_email", "score", "keywords_matched",
+            "end_date", "link"
+        ]
+        col_config = {
             "statut": st.column_config.TextColumn("Statut"),
             "source": st.column_config.TextColumn("Source"),
             "title": st.column_config.TextColumn("Projet", width="large"),
@@ -625,6 +691,30 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             "end_date": st.column_config.TextColumn("Fin projet"),
             "link": st.column_config.LinkColumn("Lien projet"),
         }
+    else:
+        display_cols = [
+            "statut", "source", "title", "organization", "country",
+            "contact_name", "score", "keywords_matched",
+            "end_date", "link"
+        ]
+        col_config = {
+            "statut": st.column_config.TextColumn("Statut"),
+            "source": st.column_config.TextColumn("Source"),
+            "title": st.column_config.TextColumn("Projet", width="large"),
+            "organization": st.column_config.TextColumn("Organisation"),
+            "country": st.column_config.TextColumn("Pays"),
+            "contact_name": st.column_config.TextColumn("Contact"),
+            "score": st.column_config.NumberColumn("Score"),
+            "keywords_matched": st.column_config.TextColumn("Mots-clés"),
+            "end_date": st.column_config.TextColumn("Fin projet"),
+            "link": st.column_config.LinkColumn("Lien projet"),
+        }
+
+    st.dataframe(
+        filtered[display_cols],
+        width="stretch",
+        height=400,
+        column_config=col_config
     )
 
     st.divider()
@@ -649,19 +739,32 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             st.info("Aucune donnée à afficher.")
 
     with viz_col2:
-        st.markdown("**Top 10 prospects par budget**")
-        df_budget = filtered.copy()
-        df_budget["budget_usd"] = pd.to_numeric(df_budget["budget_usd"], errors="coerce")
-        top10 = (
-            df_budget.dropna(subset=["budget_usd"])
-            .nlargest(10, "budget_usd")[["title", "budget_usd"]]
-        )
-        if not top10.empty:
-            top10 = top10.copy()
-            top10["label"] = top10["title"].str[:35] + "…"
-            st.bar_chart(top10.set_index("label")["budget_usd"], width="stretch")
+        if show_budget_email:
+            st.markdown("**Top 10 prospects par budget**")
+            df_budget = filtered.copy()
+            df_budget["budget_usd"] = pd.to_numeric(df_budget["budget_usd"], errors="coerce")
+            top10 = (
+                df_budget.dropna(subset=["budget_usd"])
+                .nlargest(10, "budget_usd")[["title", "budget_usd"]]
+            )
+            if not top10.empty:
+                top10 = top10.copy()
+                top10["label"] = top10["title"].str[:35] + "…"
+                st.bar_chart(top10.set_index("label")["budget_usd"], width="stretch")
+            else:
+                st.info("Aucun prospect avec budget disponible.")
         else:
-            st.info("Aucun prospect avec budget disponible.")
+            st.markdown("**Répartition par pays**")
+            if not filtered.empty:
+                country_dist = (
+                    filtered["country"]
+                    .value_counts()
+                    .rename_axis("Pays")
+                    .rename("Nombre de prospects")
+                )
+                st.bar_chart(country_dist, width="stretch")
+            else:
+                st.info("Aucune donnée à afficher.")
 
     st.divider()
 
@@ -689,10 +792,11 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             st.markdown(f"**Organisation :** {row['organization']}")
             st.markdown(f"**Pays :** {row['country']}")
 
-            budget = row["budget_usd"]
-            st.markdown(
-                f"**Budget :** {'Non disponible' if pd.isna(budget) or budget == '' else f'${int(float(budget)):,}'}"
-            )
+            if show_budget_email:
+                budget = row["budget_usd"]
+                st.markdown(
+                    f"**Budget :** {'Non disponible' if pd.isna(budget) or budget == '' else f'${int(float(budget)):,}'}"
+                )
 
             st.markdown(f"**Fin projet :** {row['end_date'] or 'Non disponible'}")
             st.markdown(f"**Score :** {int(row['score'])}")
@@ -700,7 +804,8 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
         with c2:
             st.markdown(f"**Contact :** {row['contact_name'] or 'Non disponible'}")
-            st.markdown(f"**Email :** {row['contact_email'] or 'Non disponible'}")
+            if show_budget_email:
+                st.markdown(f"**Email :** {row['contact_email'] or 'Non disponible'}")
 
             if row["link"]:
                 st.markdown(f"**Lien projet :** [Voir le projet]({row['link']})")
@@ -769,7 +874,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             st.markdown(question)
 
         with st.chat_message("assistant"):
-            response = call_gemini_chatbot(
+            response = call_ollama_chatbot(
                 user_message=question,
                 df=filtered if len(filtered) > 0 else df_base,
                 history=st.session_state[chat_key],
@@ -826,26 +931,27 @@ if not os.path.exists("leads_laser.csv"):
 
 df = load_data()
 
-df_nsf = df[df["source"] == "NSF"].copy()
-df_europe = df[df["source"].isin(["CORDIS", "NIH"])].copy()
+df_usa = df[df["source"].isin(["NSF", "NIH"])].copy()
+df_europe = df[df["source"] == "CORDIS"].copy()
 
-tab_nsf, tab_europe = st.tabs([
-    "🇺🇸 Interface NSF",
-    "🇪🇺 Interface Europe / CORDIS + NIH"
+tab_usa, tab_europe = st.tabs([
+    "🇺🇸 Interface USA (NSF + NIH)",
+    "🇪🇺 Interface Europe (CORDIS)"
 ])
 
-with tab_nsf:
+with tab_usa:
     render_prospect_interface(
-        df_base=df_nsf,
-        interface_name="Interface NSF",
-        chat_key="chat_history_nsf",
-        export_name="prospects_nsf_export.csv"
+        df_base=df_usa,
+        interface_name="Interface USA — NSF + NIH",
+        chat_key="chat_history_usa",
+        export_name="prospects_usa_export.csv"
     )
 
 with tab_europe:
     render_prospect_interface(
         df_base=df_europe,
-        interface_name="Interface Europe / CORDIS + NIH",
+        interface_name="Interface Europe — CORDIS",
         chat_key="chat_history_europe",
-        export_name="prospects_europe_cordis_nih_export.csv"
+        export_name="prospects_europe_cordis_export.csv",
+        show_budget_email=False
     )
