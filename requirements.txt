@@ -1,5 +1,8 @@
 streamlit
 pandas
 requests
-python-dotenv
 ollama
+google-generativeai
+python-dotenv
+openpyxl
+urllib3
