@@ -9,6 +9,9 @@ __pycache__/
 *.pyd
 .Python
 
+# Manuel PDF (généré localement via generate_manual_pdf.py)
+manuel_utilisation.pdf
+
 # Données générées (CSV)
 leads_laser.csv
 prospect_status.csv
