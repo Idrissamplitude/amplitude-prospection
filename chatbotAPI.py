@@ -1665,7 +1665,7 @@ col_refresh, col_info = st.columns([1, 3])
 
 with col_refresh:
     if st.button("🔄 Refresh All"):
-        with st.spinner("Collecting data... (~2 min)"):
+        with st.spinner("Collecting data..."):
             df = run_pipeline()
             st.cache_data.clear()
         st.success(f"✅ {len(df)} prospects updated!")
@@ -1709,7 +1709,7 @@ with tab_usa:
     _col_usa_btn, _ = st.columns([1, 4])
     with _col_usa_btn:
         if st.button("🇺🇸 Refresh USA", key="btn_usa_tab"):
-            with st.spinner("Collecting NSF + NIH... (~1 min)"):
+            with st.spinner("Collecting NSF + NIH..."):
                 refresh_usa_only()
                 st.cache_data.clear()
             st.success("✅ USA updated!")
@@ -1728,7 +1728,7 @@ with tab_europe:
     _col_eu_btn, _ = st.columns([1, 4])
     with _col_eu_btn:
         if st.button("🇪🇺 Refresh Europe", key="btn_europe_tab"):
-            with st.spinner("Collecting CORDIS + UKRI... (~2 min)"):
+            with st.spinner("Collecting CORDIS + UKRI..."):
                 refresh_europe_only()
                 st.cache_data.clear()
             st.success("✅ Europe updated!")
@@ -1833,7 +1833,7 @@ with tab_ted:
     _col_ted_btn, _col_ted_radio = st.columns([1, 3])
     with _col_ted_btn:
         if st.button("📋 Refresh TED", key="btn_ted_tab"):
-            with st.spinner("Collecting TED... (~10 sec)"):
+            with st.spinner("Collecting TED..."):
                 refresh_ted_only()
                 st.cache_data.clear()
             st.success("✅ TED updated!")
@@ -1872,7 +1872,7 @@ with tab_canada:
     _col_canada_btn, _ = st.columns([1, 4])
     with _col_canada_btn:
         if st.button("🍁 Refresh Canada", key="btn_canada_tab"):
-            with st.spinner("Collecting NSERC + CIHR... (~1 min)"):
+            with st.spinner("Collecting NSERC + CIHR..."):
                 refresh_nserc_only()
                 refresh_cihr_only()
                 st.cache_data.clear()
@@ -1892,6 +1892,7 @@ with tab_canada:
             budget_symbol="CA$",
             show_country_chart=True
         )
+
 
 
 
