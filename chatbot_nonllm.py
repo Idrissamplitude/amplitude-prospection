@@ -356,7 +356,8 @@ with col_f1:
 with col_f2:
     budget_range = st.slider("Budget ($)", 0, 15_000_000, (0, 15_000_000), 100_000, format="$%d")
 with col_f3:
-    sources = st.multiselect("Source", ["NSF", "NIH", "CORDIS"], default=["NSF", "NIH", "CORDIS"])
+    _all_sources = sorted(df["source"].dropna().unique().tolist())
+    sources = st.multiselect("Source", _all_sources, default=_all_sources)
 with col_f4:
     email_only = st.checkbox("Email uniquement", value=False)
 with col_f5:
@@ -400,7 +401,6 @@ elif sort_by == "Date de fin":
     filtered["_date_sort"] = pd.to_datetime(filtered["end_date"], errors="coerce")
     filtered = filtered.sort_values("_date_sort", ascending=ascending, na_position="last")
     filtered = filtered.drop(columns=["_date_sort"])
-
 filtered = filtered.reset_index(drop=True)
 filtered.index = filtered.index + 1
 st.caption(f"**{len(filtered)} prospects** correspondent aux filtres")

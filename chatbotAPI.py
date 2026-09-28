@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
-import ollama
 import re
 
 st.set_page_config(page_title="Laser Prospects", page_icon="🔬", layout="wide")
@@ -31,25 +30,23 @@ def check_password():
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown("### Connexion")
+        st.markdown("### Login")
         with st.form("login_form"):
-            pwd = st.text_input("Mot de passe", type="password")
-            submitted = st.form_submit_button("Se connecter", use_container_width=True)
+            pwd = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
             if submitted:
                 if pwd == app_password:
                     st.session_state["authenticated"] = True
                     st.rerun()
                 else:
-                    st.error("Mot de passe incorrect.")
+                    st.error("Incorrect password.")
 
     return False
 
 if not check_password():
     st.stop()
 
-OLLAMA_MODEL = "phi3:mini"
-
-DATE_CUTOFF = datetime.today() - timedelta(days=365 * 2)  # projets terminés depuis max 2 ans
+DATE_CUTOFF = datetime.today() - timedelta(days=365 * 2)
 
 # ─── CONFIG PIPELINE ──────────────────────────────────────────────────────────
 KEYWORD = "laser"
@@ -86,6 +83,11 @@ KEYWORDS_WEIGHTS = {
 # Score max théorique : chaque mot-clé en titre (×2) + description (×1)
 SCORE_MAX = sum(w * 3 for w in KEYWORDS_WEIGHTS.values())
 SCORE_MIN_FILTER = 5
+
+EXCLUSION_KEYWORDS_DEFAULT = [
+    "printer", "imprimante", "3d printing", "inkjet", "dental", "dentaire",
+    "tattoo", "tatouage", "hair removal", "épilation",
+]
 
 
 def compute_score(title: str, description: str, kw_dict: dict = None) -> tuple:
@@ -148,7 +150,7 @@ def collect_nsf():
             time.sleep(0.3)
 
         except Exception as e:
-            st.warning(f"NSF - Erreur : {e}")
+            st.warning(f"NSF - Error: {e}")
             break
 
     rows = []
@@ -241,7 +243,7 @@ def collect_nih():
             time.sleep(0.3)
 
         except Exception as e:
-            st.warning(f"NIH - Erreur : {e}")
+            st.warning(f"NIH - Error: {e}")
             break
 
     rows = []
@@ -457,24 +459,46 @@ TED_FIELDS = [
     "total-value", "estimated-value-proc",
     "publication-date", "publication-number",
     "deadline-receipt-tender-date-lot",
+    "notice-type",
 ]
+
+TED_NOTICE_STATUS = {
+    "cn-standard":      "Ouvert",
+    "cn-social":        "Ouvert",
+    "cn-defence":       "Ouvert",
+    "pin-cfc-standard": "À venir",
+    "pin-rtl":          "À venir",
+    "can-standard":     "Attribué",
+    "can-social":       "Attribué",
+    "can-defence":      "Attribué",
+    "qu-sy":            "Qualification",
+}
 
 def collect_ted():
     all_notices = []
+    date_from = DATE_CUTOFF.strftime("%Y%m%d")
+    query = (
+        f'(notice-title ~ "laser" OR notice-title ~ "photonics" OR '
+        f'notice-title ~ "femtosecond" OR notice-title ~ "ultrafast" OR '
+        f'notice-title ~ "ablation" OR notice-title ~ "ultrashort" OR '
+        f'notice-title ~ "biophotonics" OR notice-title ~ "fiber laser" OR '
+        f'notice-title ~ "lidar" OR notice-title ~ "optics") '
+        f'AND publication-date >= {date_from}'
+    )
 
-    for page in range(1, 11):
+    for page in range(1, 6):
         payload = {
-            "query": TED_QUERY,
+            "query": query,
             "fields": TED_FIELDS,
             "page": page,
-            "limit": 10,
+            "limit": 100,
             "scope": 1,
         }
         try:
             r = requests.post(
                 "https://api.ted.europa.eu/v3/notices/search",
                 json=payload,
-                timeout=15
+                timeout=20
             )
             notices = r.json().get("notices", [])
             if not notices:
@@ -482,7 +506,7 @@ def collect_ted():
             all_notices.extend(notices)
             time.sleep(0.3)
         except Exception as e:
-            st.warning(f"TED - Erreur : {e}")
+            st.warning(f"TED - Error: {e}")
             break
 
     rows = []
@@ -518,16 +542,16 @@ def collect_ted():
         if not link and pub_number:
             link = f"https://ted.europa.eu/en/notice/-/detail/{pub_number}"
 
-        deadline = (notice.get("deadline-receipt-tender-date-lot", "") or "")[:10]
+        # deadline peut arriver comme liste ['2024-02-09T23:59:59+01:00']
+        deadline_raw = notice.get("deadline-receipt-tender-date-lot") or ""
+        if isinstance(deadline_raw, list):
+            deadline_raw = deadline_raw[0] if deadline_raw else ""
+        deadline = str(deadline_raw)[:10]
         if not deadline:
             deadline = (notice.get("publication-date", "") or "")[:10]
 
-        if deadline:
-            try:
-                if datetime.strptime(deadline, "%Y-%m-%d") < DATE_CUTOFF:
-                    continue
-            except Exception:
-                pass
+        notice_type = notice.get("notice-type", "") or ""
+        notice_status = TED_NOTICE_STATUS.get(notice_type, "Inconnu")
 
         score, matched = compute_score(title, description)
 
@@ -545,6 +569,7 @@ def collect_ted():
             "description": description,
             "end_date": deadline,
             "link": link,
+            "notice_status": notice_status,
         })
 
     df = pd.DataFrame(rows)
@@ -745,7 +770,7 @@ def collect_ukri() -> pd.DataFrame:
                 time.sleep(0.3)
 
             except Exception as e:
-                st.warning(f"UKRI '{term}' p{page} — Erreur: {e}")
+                st.warning(f"UKRI '{term}' p{page} — Error: {e}")
                 break
 
     if not candidates:
@@ -794,10 +819,9 @@ def collect_ukri() -> pd.DataFrame:
 
 
 def refresh_europe_only():
-    """Rafraîchit CORDIS + UKRI ensemble."""
-    st.info("🇪🇺 Collecte CORDIS...")
+    st.info("🇪🇺 Collecting CORDIS...")
     df_cordis_new = collect_cordis()
-    st.info("🇬🇧 Collecte UKRI...")
+    st.info("🇬🇧 Collecting UKRI...")
     df_ukri_new = collect_ukri()
 
     if os.path.exists("leads_laser.csv"):
@@ -962,8 +986,7 @@ def collect_cihr() -> pd.DataFrame:
 
 
 def refresh_cihr_only():
-    """Rafraîchit uniquement les données CIHR."""
-    st.info("🏥 Collecte CIHR (Canada)...")
+    st.info("🏥 Collecting CIHR (Canada)...")
     df_cihr_new = collect_cihr()
 
     if os.path.exists("leads_laser.csv"):
@@ -983,25 +1006,25 @@ def refresh_cihr_only():
 
 # ─── PIPELINE GLOBAL ──────────────────────────────────────────────────────────
 def run_pipeline():
-    st.info("📡 Collecte NSF...")
+    st.info("📡 Collecting NSF...")
     df_nsf = collect_nsf()
 
-    st.info("🔬 Collecte NIH...")
+    st.info("🔬 Collecting NIH...")
     df_nih = collect_nih()
 
-    st.info("🇪🇺 Collecte CORDIS...")
+    st.info("🇪🇺 Collecting CORDIS...")
     df_cordis = collect_cordis()
 
-    st.info("📋 Collecte TED (appels d'offres EU)...")
+    st.info("📋 Collecting TED (EU tenders)...")
     df_ted = collect_ted()
 
-    st.info("🍁 Collecte NSERC (Canada)...")
+    st.info("🍁 Collecting NSERC (Canada)...")
     df_nserc = collect_nserc()
 
-    st.info("🏥 Collecte CIHR (Canada)...")
+    st.info("🏥 Collecting CIHR (Canada)...")
     df_cihr = collect_cihr()
 
-    st.info("🇬🇧 Collecte UKRI (UK)...")
+    st.info("🇬🇧 Collecting UKRI (UK)...")
     df_ukri = collect_ukri()
 
     df_total = pd.concat([df_nsf, df_nih, df_cordis, df_ted, df_nserc, df_cihr, df_ukri], ignore_index=True)
@@ -1016,8 +1039,7 @@ def run_pipeline():
 
 
 def refresh_ted_only():
-    """Rafraîchit uniquement les données TED sans retoucher NSF/NIH/CORDIS."""
-    st.info("📋 Collecte TED (appels d'offres EU)...")
+    st.info("📋 Collecting TED (EU tenders)...")
     df_ted_new = collect_ted()
 
     if os.path.exists("leads_laser.csv"):
@@ -1038,10 +1060,9 @@ def refresh_ted_only():
 
 
 def refresh_usa_only():
-    """Rafraîchit uniquement les données NSF + NIH."""
-    st.info("📡 Collecte NSF...")
+    st.info("📡 Collecting NSF...")
     df_nsf_new = collect_nsf()
-    st.info("🔬 Collecte NIH...")
+    st.info("🔬 Collecting NIH...")
     df_nih_new = collect_nih()
 
     if os.path.exists("leads_laser.csv"):
@@ -1062,8 +1083,7 @@ def refresh_usa_only():
 
 
 def refresh_nserc_only():
-    """Rafraîchit uniquement les données NSERC."""
-    st.info("🍁 Collecte NSERC (Canada)...")
+    st.info("🍁 Collecting NSERC (Canada)...")
     df_nserc_new = collect_nserc()
 
     if os.path.exists("leads_laser.csv"):
@@ -1084,7 +1104,7 @@ def refresh_nserc_only():
 
 # ─── STATUTS PROSPECTS ───────────────────────────────────────────────────────
 STATUS_FILE = "prospect_status.csv"
-STATUTS = ["—", "À contacter", "Contacté", "Pas intéressé"]
+STATUTS = ["—", "To contact", "Contacted", "Not interested"]
 
 
 
@@ -1135,6 +1155,10 @@ def load_data():
             df[col] = ""
         df[col] = df[col].fillna("").astype(str)
 
+    if "notice_status" not in df.columns:
+        df["notice_status"] = ""
+    df["notice_status"] = df["notice_status"].fillna("").astype(str)
+
     df["score"] = pd.to_numeric(df["score"], errors="coerce").fillna(0)
     df["budget_usd"] = pd.to_numeric(df["budget_usd"], errors="coerce")
     if "budget_eur" not in df.columns:
@@ -1152,105 +1176,13 @@ def load_data():
 
     return df
 
-# ─── CONTEXTE PROSPECTS ───────────────────────────────────────────────────────
-def dataframe_context(df: pd.DataFrame, max_rows: int = 40) -> str:
-    if df.empty:
-        return "Aucun prospect disponible."
-
-    cols = [
-        "source", "title", "organization", "country", "budget_usd",
-        "contact_name", "contact_email", "score",
-        "keywords_matched", "description", "end_date", "link"
-    ]
-
-    safe_df = df.copy()
-
-    for col in cols:
-        if col not in safe_df.columns:
-            safe_df[col] = ""
-
-    safe_df = safe_df[cols].head(max_rows).fillna("")
-    return safe_df.to_json(orient="records", force_ascii=False)
-
-# ─── CHATBOT OLLAMA (multi-tours) ─────────────────────────────────────────────
-SYSTEM_PROMPT_TEMPLATE = """Tu es un assistant commercial d'Amplitude Laser, spécialisé dans la prospection B2B laser.
-
-Interface actuelle : {interface_name}
-
-Voici la base de prospects disponible (format JSON) :
-{prospects_context}
-
-Règles absolues :
-- Réponds uniquement en français, de façon naturelle et concise
-- Ne cite que des prospects présents dans la base ci-dessus — n'invente rien
-- Quand tu proposes un prospect, cite : titre, organisation, pays, score, budget (si dispo), contact (si dispo)
-- Si l'utilisateur dit "d'autres" ou "autres prospects", évite ceux déjà cités dans la conversation
-- Si la demande est floue, pose UNE courte question de clarification
-- "Les plus pertinents" = meilleurs scores par défaut
-"""
-
-_GREETINGS = {"bonjour", "salut", "hello", "bonsoir", "coucou", "hey"}
-_RESETS = {"reset", "réinitialiser", "recommencer", "efface", "vider", "nouveau"}
-
-def _rule_based_shortcut(message: str) -> str | None:
-    low = message.strip().lower()
-    if low in _GREETINGS or low.split()[0] in _GREETINGS:
-        return "Bonjour ! Comment puis-je vous aider dans votre prospection laser ?"
-    if any(w in low for w in _RESETS):
-        return "__RESET__"
-    return None
-
-def stream_ollama_chatbot(user_message: str, df: pd.DataFrame, chat_key: str, interface_name: str):
-    """Générateur de tokens pour st.write_stream — gère l'historique multi-tours."""
-    shortcut = _rule_based_shortcut(user_message)
-    session_key = f"{chat_key}_ollama_session"
-
-    if shortcut == "__RESET__":
-        if session_key in st.session_state:
-            del st.session_state[session_key]
-        yield "Conversation réinitialisée."
-        return
-    if shortcut:
-        yield shortcut
-        return
-
-    if session_key not in st.session_state:
-        system_content = SYSTEM_PROMPT_TEMPLATE.format(
-            interface_name=interface_name,
-            prospects_context=dataframe_context(df, max_rows=10)
-        )
-        st.session_state[session_key] = [
-            {"role": "system", "content": system_content}
-        ]
-
-    history = st.session_state[session_key]
-    history.append({"role": "user", "content": user_message})
-    messages_to_send = [history[0]] + history[-6:]
-    full_answer = ""
-
-    try:
-        for chunk in ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=messages_to_send,
-            options={"temperature": 0.2},
-            stream=True
-        ):
-            token = chunk["message"]["content"]
-            full_answer += token
-            yield token
-        history.append({"role": "assistant", "content": full_answer.strip()})
-    except Exception as e:
-        history.pop()
-        yield f"Erreur Ollama : {e}"
-
 # ─── COMPOSANT INTERFACE ──────────────────────────────────────────────────────
-def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_key: str, export_name: str, show_budget_email: bool = True, budget_col: str = "budget_usd", budget_symbol: str = "$", show_country_chart: bool = False, known_sources: list = None):
+def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_key: str, export_name: str, show_budget_email: bool = True, budget_col: str = "budget_usd", budget_symbol: str = "$", show_country_chart: bool = False, known_sources: list = None, show_notice_status: bool = False):
 
-    # ─── MOTS-CLÉS DE SCORING ─────────────────────────────────────────────────
-    with st.expander("🔑 Mots-clés de scoring", expanded=False):
+    with st.expander("🔑 Scoring Keywords", expanded=False):
         if "kw_df" not in st.session_state:
             st.session_state["kw_df"] = pd.DataFrame(
-                [{"Mot-clé": k, "Poids": v} for k, v in KEYWORDS_WEIGHTS.items()]
+                [{"Keyword": k, "Weight": v} for k, v in KEYWORDS_WEIGHTS.items()]
             )
 
         edited_kw = st.data_editor(
@@ -1258,56 +1190,67 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             num_rows="dynamic",
             use_container_width=True,
             column_config={
-                "Mot-clé": st.column_config.TextColumn("Mot-clé"),
-                "Poids": st.column_config.NumberColumn("Poids", min_value=1, max_value=10, step=1),
+                "Keyword": st.column_config.TextColumn("Keyword"),
+                "Weight": st.column_config.NumberColumn("Weight", min_value=1, max_value=10, step=1),
             },
             key=f"{chat_key}_kw_editor"
         )
 
         col_apply, col_reset, col_info = st.columns([1, 1, 4])
         with col_apply:
-            if st.button("✅ Appliquer", use_container_width=True, key=f"{chat_key}_kw_apply"):
+            if st.button("✅ Apply", use_container_width=True, key=f"{chat_key}_kw_apply"):
                 new_kw = {
-                    str(row["Mot-clé"]).strip(): int(row["Poids"])
+                    str(row["Keyword"]).strip(): int(row["Weight"])
                     for _, row in edited_kw.iterrows()
-                    if str(row["Mot-clé"]).strip() and pd.notna(row["Poids"])
+                    if str(row["Keyword"]).strip() and pd.notna(row["Weight"])
                 }
                 st.session_state["custom_keywords"] = new_kw
                 st.session_state["kw_df"] = edited_kw
                 st.rerun()
         with col_reset:
-            if st.button("🔄 Défaut", use_container_width=True, key=f"{chat_key}_kw_reset"):
+            if st.button("🔄 Default", use_container_width=True, key=f"{chat_key}_kw_reset"):
                 for k in ("kw_df", "custom_keywords"):
                     st.session_state.pop(k, None)
                 st.rerun()
         with col_info:
             active_kw = st.session_state.get("custom_keywords", KEYWORDS_WEIGHTS)
             if "custom_keywords" in st.session_state:
-                st.caption(f"✏️ {len(active_kw)} mots-clés personnalisés")
+                st.caption(f"✏️ {len(active_kw)} custom keywords")
             else:
-                st.caption(f"{len(active_kw)} mots-clés par défaut")
+                st.caption(f"{len(active_kw)} default keywords")
 
-    sources = df_base["source"].unique().tolist() if not df_base.empty else []
-    source_counts = [(s, int((df_base["source"] == s).sum())) for s in sources]
-    score_max = int(df_base["score"].max()) if len(df_base) > 0 else 0
-
-    cols = st.columns(2 + len(source_counts))
-    cols[0].metric("Total", len(df_base))
-    for i, (src, cnt) in enumerate(source_counts):
-        cols[1 + i].metric(src, cnt)
-    cols[-1].metric("Score max", score_max)
-
-    st.divider()
+    with st.expander("🚫 Exclusion Keywords", expanded=False):
+        active_excl = st.session_state.get("exclusion_keywords", EXCLUSION_KEYWORDS_DEFAULT)
+        excl_text = st.text_area(
+            "One word or phrase per line — any project containing these words (title or description) will be hidden",
+            value="\n".join(active_excl),
+            height=130,
+            key=f"{chat_key}_excl_editor"
+        )
+        col_excl_apply, col_excl_reset, col_excl_info = st.columns([1, 1, 4])
+        with col_excl_apply:
+            if st.button("✅ Apply", key=f"{chat_key}_excl_apply", use_container_width=True):
+                new_excl = [w.strip().lower() for w in excl_text.splitlines() if w.strip()]
+                st.session_state["exclusion_keywords"] = new_excl
+                st.rerun()
+        with col_excl_reset:
+            if st.button("🔄 Default", key=f"{chat_key}_excl_reset", use_container_width=True):
+                st.session_state.pop("exclusion_keywords", None)
+                st.rerun()
+        with col_excl_info:
+            n_excl = len(active_excl)
+            custom_excl = "exclusion_keywords" in st.session_state
+            st.caption(f"{'✏️ ' if custom_excl else ''}{n_excl} excluded word(s) {'(custom)' if custom_excl else '(default)'}")
 
     # ─── FILTRES & TRI (expander) ─────────────────────────────────────────────
     search_query = st.text_input(
-        "🔎 Recherche libre (titre, description, organisation)",
+        "🔎 Free search (title, description, organisation)",
         value="",
-        placeholder="ex: photonics, Stanford, ablation...",
+        placeholder="e.g. photonics, Stanford, ablation...",
         key=f"{chat_key}_search"
     )
 
-    with st.expander("🎛️ Filtres & Tri", expanded=False):
+    with st.expander("🎛️ Filters & Sort", expanded=False):
         max_score = int(df_base["score"].max()) if len(df_base) > 0 else 15
 
         if show_budget_email:
@@ -1315,7 +1258,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
             with col_f1:
                 score_min = st.slider(
-                    "Score minimum",
+                    "Minimum score",
                     0,
                     max_score,
                     5,
@@ -1335,20 +1278,20 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
             with col_f3:
                 email_only = st.checkbox(
-                    "Email uniquement",
+                    "Email only",
                     value=False,
                     key=f"{chat_key}_email"
                 )
 
             with col_f4:
                 budget_only = st.checkbox(
-                    "Budget uniquement",
+                    "Budget only",
                     value=False,
                     key=f"{chat_key}_budget_only"
                 )
         else:
             score_min = st.slider(
-                "Score minimum",
+                "Minimum score",
                 0,
                 max_score,
                 5,
@@ -1362,7 +1305,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
         with col_f5:
             statut_filter = st.multiselect(
-                "Filtrer par statut",
+                "Filter by status",
                 STATUTS[1:],
                 default=[],
                 key=f"{chat_key}_statut_filter"
@@ -1372,16 +1315,16 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             dynamic_sources = sorted(df_base["source"].dropna().unique().tolist()) if not df_base.empty else []
             available_sources = sorted(set(dynamic_sources + (known_sources or [])))
             source_filter = st.multiselect(
-                "Filtrer par source",
+                "Filter by source",
                 available_sources,
                 default=[],
                 key=f"{chat_key}_source_filter"
             )
 
         with col_s1:
-            sort_options = ["Score", "Budget", "Date de fin"] if show_budget_email else ["Score", "Date de fin"]
+            sort_options = ["Score", "Budget", "End Date"] if show_budget_email else ["Score", "End Date"]
             sort_by = st.selectbox(
-                "Trier par",
+                "Sort by",
                 sort_options,
                 index=0,
                 key=f"{chat_key}_sort_by"
@@ -1389,15 +1332,26 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
         with col_s2:
             sort_order = st.selectbox(
-                "Ordre",
-                ["Décroissant ↓", "Croissant ↑"],
+                "Order",
+                ["Descending ↓", "Ascending ↑"],
                 index=0,
                 key=f"{chat_key}_sort_order"
             )
 
     statuses = load_status()
 
-    filtered = df_base[df_base["score"] >= score_min].copy()
+    # Appliquer les mots-clés d'exclusion
+    active_excl = st.session_state.get("exclusion_keywords", EXCLUSION_KEYWORDS_DEFAULT)
+    df_filtered_base = df_base.copy()
+    if active_excl:
+        excl_pattern = "|".join(re.escape(w) for w in active_excl)
+        mask_excl = (
+            df_filtered_base["title"].str.lower().str.contains(excl_pattern, na=False) |
+            df_filtered_base["description"].str.lower().str.contains(excl_pattern, na=False)
+        )
+        df_filtered_base = df_filtered_base[~mask_excl]
+
+    filtered = df_filtered_base[df_filtered_base["score"] >= score_min].copy()
     filtered["statut"] = filtered["link"].map(lambda l: statuses.get(l, {}).get("status", "—"))
 
     if search_query.strip():
@@ -1428,7 +1382,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             ((budget_numeric >= budget_range[0]) & (budget_numeric <= budget_range[1]))
         ]
 
-    ascending = sort_order == "Croissant ↑"
+    ascending = sort_order == "Ascending ↑"
 
     if sort_by == "Score":
         filtered = filtered.sort_values("score", ascending=ascending)
@@ -1436,7 +1390,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
         filtered["_budget_sort"] = pd.to_numeric(filtered[budget_col], errors="coerce")
         filtered = filtered.sort_values("_budget_sort", ascending=ascending, na_position="last")
         filtered = filtered.drop(columns=["_budget_sort"])
-    elif sort_by == "Date de fin":
+    elif sort_by == "End Date":
         filtered["_date_sort"] = pd.to_datetime(filtered["end_date"], errors="coerce")
         filtered = filtered.sort_values("_date_sort", ascending=ascending, na_position="last")
         filtered = filtered.drop(columns=["_date_sort"])
@@ -1444,11 +1398,19 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
     filtered = filtered.reset_index(drop=True)
     filtered.index = filtered.index + 1
 
-    st.caption(f"**{len(filtered)} prospects** correspondent aux filtres")
+    sources_filtered = filtered["source"].unique().tolist() if not filtered.empty else []
+    source_counts_filtered = [(s, int((filtered["source"] == s).sum())) for s in sources_filtered]
+    score_max_filtered = int(filtered["score"].max()) if not filtered.empty else 0
+
+    cols = st.columns(2 + len(source_counts_filtered))
+    cols[0].metric("Total", len(filtered))
+    for i, (src, cnt) in enumerate(source_counts_filtered):
+        cols[1 + i].metric(src, cnt)
+    cols[-1].metric("Max score", score_max_filtered)
+
     st.divider()
 
-    # ─── TOP 5 CARTES ─────────────────────────────────────────────────────────
-    st.subheader("🏆 Top 5 prospects")
+    st.subheader("🏆 Top 5 Prospects")
 
     top5 = filtered.head(5) if not filtered.empty else pd.DataFrame()
 
@@ -1473,12 +1435,11 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
                     if statut_val != "—":
                         st.caption(f"📌 {statut_val}")
     else:
-        st.info("Aucun prospect à afficher.")
+        st.info("No prospects to display.")
 
     st.divider()
 
-    # ─── TABLEAU ──────────────────────────────────────────────────────────────
-    st.subheader("📋 Prospects qualifiés")
+    st.subheader("📋 Qualified Prospects")
 
     if show_budget_email:
         display_cols = [
@@ -1487,18 +1448,18 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             "end_date", "link"
         ]
         col_config = {
-            "statut": st.column_config.TextColumn("Statut"),
+            "statut": st.column_config.TextColumn("Status"),
             "source": st.column_config.TextColumn("Source"),
-            "title": st.column_config.TextColumn("Projet", width="large"),
+            "title": st.column_config.TextColumn("Project", width="large"),
             "organization": st.column_config.TextColumn("Organisation"),
-            "country": st.column_config.TextColumn("Pays"),
+            "country": st.column_config.TextColumn("Country"),
             budget_col: st.column_config.NumberColumn(f"Budget ({budget_symbol})", format=f"{budget_symbol}%d"),
             "contact_name": st.column_config.TextColumn("Contact"),
             "contact_email": st.column_config.TextColumn("Email"),
             "score": st.column_config.NumberColumn("Score"),
-            "keywords_matched": st.column_config.TextColumn("Mots-clés"),
-            "end_date": st.column_config.TextColumn("Fin projet"),
-            "link": st.column_config.LinkColumn("Lien projet"),
+            "keywords_matched": st.column_config.TextColumn("Keywords"),
+            "end_date": st.column_config.TextColumn("End Date"),
+            "link": st.column_config.LinkColumn("Project Link"),
         }
     else:
         display_cols = [
@@ -1507,17 +1468,21 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
             "end_date", "link"
         ]
         col_config = {
-            "statut": st.column_config.TextColumn("Statut"),
+            "statut": st.column_config.TextColumn("Status"),
             "source": st.column_config.TextColumn("Source"),
-            "title": st.column_config.TextColumn("Projet", width="large"),
+            "title": st.column_config.TextColumn("Project", width="large"),
             "organization": st.column_config.TextColumn("Organisation"),
-            "country": st.column_config.TextColumn("Pays"),
+            "country": st.column_config.TextColumn("Country"),
             "contact_name": st.column_config.TextColumn("Contact"),
             "score": st.column_config.NumberColumn("Score"),
-            "keywords_matched": st.column_config.TextColumn("Mots-clés"),
-            "end_date": st.column_config.TextColumn("Fin projet"),
-            "link": st.column_config.LinkColumn("Lien projet"),
+            "keywords_matched": st.column_config.TextColumn("Keywords"),
+            "end_date": st.column_config.TextColumn("End Date"),
+            "link": st.column_config.LinkColumn("Project Link"),
         }
+
+    if show_notice_status and "notice_status" in filtered.columns:
+        display_cols = ["notice_status"] + display_cols
+        col_config["notice_status"] = st.column_config.TextColumn("Call Type")
 
     st.dataframe(
         filtered[display_cols],
@@ -1528,8 +1493,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
     st.divider()
 
-    # ─── VISUALISATIONS ───────────────────────────────────────────────────────
-    st.subheader("📊 Visualisations")
+    st.subheader("📊 Charts")
 
     if show_country_chart:
         viz_col1, viz_col2, viz_col3 = st.columns(3)
@@ -1538,22 +1502,22 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
         viz_col3 = None
 
     with viz_col1:
-        st.markdown("**Distribution des scores**")
+        st.markdown("**Score Distribution**")
         if not filtered.empty:
             score_dist = (
                 filtered["score"]
                 .value_counts()
                 .sort_index()
                 .rename_axis("Score")
-                .rename("Nombre de prospects")
+                .rename("Prospects")
             )
             st.bar_chart(score_dist, width="stretch")
         else:
-            st.info("Aucune donnée à afficher.")
+            st.info("No data to display.")
 
     with viz_col2:
         if show_budget_email:
-            st.markdown(f"**Top 10 prospects par budget ({budget_symbol})**")
+            st.markdown(f"**Top 10 Prospects by Budget ({budget_symbol})**")
             df_budget = filtered.copy()
             df_budget[budget_col] = pd.to_numeric(df_budget[budget_col], errors="coerce")
             top10 = (
@@ -1565,44 +1529,43 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
                 top10["label"] = top10["title"].str[:35] + "…"
                 st.bar_chart(top10.set_index("label")[budget_col], width="stretch")
             else:
-                st.info("Aucun prospect avec budget disponible.")
+                st.info("No prospect with available budget.")
         else:
-            st.markdown("**Répartition par pays**")
+            st.markdown("**Distribution by Country**")
             if not filtered.empty:
                 country_dist = (
                     filtered["country"]
                     .value_counts()
-                    .rename_axis("Pays")
-                    .rename("Nombre de prospects")
+                    .rename_axis("Country")
+                    .rename("Prospects")
                 )
                 st.bar_chart(country_dist, width="stretch")
             else:
-                st.info("Aucune donnée à afficher.")
+                st.info("No data to display.")
 
     if show_country_chart and viz_col3 is not None:
         with viz_col3:
-            st.markdown("**Répartition par pays**")
+            st.markdown("**Distribution by Country**")
             if not filtered.empty:
                 country_dist = (
                     filtered["country"]
                     .value_counts()
-                    .rename_axis("Pays")
-                    .rename("Nombre de prospects")
+                    .rename_axis("Country")
+                    .rename("Prospects")
                 )
                 st.bar_chart(country_dist, width="stretch")
             else:
-                st.info("Aucune donnée à afficher.")
+                st.info("No data to display.")
 
     st.divider()
 
-    # ─── DÉTAIL PROSPECT ──────────────────────────────────────────────────────
-    st.subheader("🔍 Détail d'un prospect")
+    st.subheader("🔍 Prospect Detail")
 
     if len(filtered) > 0:
         options = {i: f"#{i} — {row['title'][:60]}{'...' if len(row['title']) > 60 else ''}" for i, row in filtered.iterrows()}
 
         selected_idx = st.selectbox(
-            "Sélectionne un prospect",
+            "Select a prospect",
             list(options.keys()),
             format_func=lambda x: options[x],
             key=f"{chat_key}_selected_prospect"
@@ -1613,35 +1576,35 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
         c1, c2 = st.columns(2)
 
         with c1:
-            st.markdown(f"**# Prospect :** {selected_idx}")
-            st.markdown(f"**Titre :** {row['title']}")
-            st.markdown(f"**Source :** {row['source']}")
-            st.markdown(f"**Organisation :** {row['organization']}")
-            st.markdown(f"**Pays :** {row['country']}")
+            st.markdown(f"**# Prospect:** {selected_idx}")
+            st.markdown(f"**Title:** {row['title']}")
+            st.markdown(f"**Source:** {row['source']}")
+            st.markdown(f"**Organisation:** {row['organization']}")
+            st.markdown(f"**Country:** {row['country']}")
 
             if show_budget_email:
                 budget = row[budget_col]
                 st.markdown(
-                    f"**Budget :** {'Non disponible' if pd.isna(budget) or budget == '' else f'{budget_symbol}{int(float(budget)):,}'}"
+                    f"**Budget:** {'N/A' if pd.isna(budget) or budget == '' else f'{budget_symbol}{int(float(budget)):,}'}"
                 )
 
-            st.markdown(f"**Fin projet :** {row['end_date'] or 'Non disponible'}")
-            st.markdown(f"**Score :** {int(row['score'])}")
-            st.markdown(f"**Mots-clés :** {row['keywords_matched']}")
+            st.markdown(f"**End Date:** {row['end_date'] or 'N/A'}")
+            st.markdown(f"**Score:** {int(row['score'])}")
+            st.markdown(f"**Keywords:** {row['keywords_matched']}")
 
         with c2:
-            st.markdown(f"**Contact :** {row['contact_name'] or 'Non disponible'}")
+            st.markdown(f"**Contact:** {row['contact_name'] or 'N/A'}")
             if show_budget_email:
-                st.markdown(f"**Email :** {row['contact_email'] or 'Non disponible'}")
+                st.markdown(f"**Email:** {row['contact_email'] or 'N/A'}")
 
             if row["link"]:
-                st.markdown(f"**Lien projet :** [Voir le projet]({row['link']})")
+                st.markdown(f"**Project link:** [View project]({row['link']})")
 
-        st.markdown("**Résumé du projet :**")
+        st.markdown("**Project Summary:**")
         st.info(row["description"])
 
         st.divider()
-        st.markdown("**Statut commercial**")
+        st.markdown("**Commercial Status**")
 
         prospect_key = row["link"] or row["title"]
         current = statuses.get(prospect_key, {})
@@ -1652,7 +1615,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 
         with s_col1:
             new_status = st.selectbox(
-                "Statut",
+                "Status",
                 STATUTS,
                 index=STATUTS.index(current_status) if current_status in STATUTS else 0,
                 key=f"{chat_key}_status_{selected_idx}"
@@ -1665,63 +1628,22 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
                 key=f"{chat_key}_note_{selected_idx}"
             )
 
-        if st.button("Enregistrer le statut", key=f"{chat_key}_save_{selected_idx}"):
+        if st.button("Save status", key=f"{chat_key}_save_{selected_idx}"):
             save_status(prospect_key, row["title"], new_status, new_note)
-            st.success("Statut enregistré.")
+            st.success("Status saved.")
             st.rerun()
 
     else:
-        st.warning("Aucun prospect ne correspond aux filtres.")
+        st.warning("No prospect matches the current filters.")
 
     st.divider()
 
-    # ─── CHAT IA ──────────────────────────────────────────────────────────────
-    st.subheader("🤖 Assistant commercial IA")
-    st.caption("Exemples : 'Quels sont les prospects les plus pertinents ?' | 'Montre-moi d'autres prospects avec un gros budget'")
-
-    if chat_key not in st.session_state:
-        st.session_state[chat_key] = []
-
-    for msg in st.session_state[chat_key]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    question = st.chat_input(
-        f"Pose ta question pour {interface_name}...",
-        key=f"{chat_key}_input"
-    )
-
-    if question:
-        st.session_state[chat_key].append({
-            "role": "user",
-            "content": question
-        })
-
-        with st.chat_message("user"):
-            st.markdown(question)
-
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream_ollama_chatbot(
-                user_message=question,
-                df=filtered if len(filtered) > 0 else df_base,
-                chat_key=chat_key,
-                interface_name=interface_name
-            ))
-
-        st.session_state[chat_key].append({
-            "role": "assistant",
-            "content": response
-        })
-
-    st.divider()
-
-    # ─── EXPORT ───────────────────────────────────────────────────────────────
     st.subheader("⬇️ Export")
 
     csv = filtered.to_csv(index=False, sep=";").encode("utf-8-sig")
 
     st.download_button(
-        "📥 Télécharger les prospects (CSV)",
+        "📥 Download Prospects (CSV)",
         data=csv,
         file_name=export_name,
         mime="text/csv",
@@ -1732,7 +1654,7 @@ def render_prospect_interface(df_base: pd.DataFrame, interface_name: str, chat_k
 col_header, col_logo = st.columns([4, 1])
 
 with col_header:
-    st.title("🔬 Laser Prospects — Prospection intelligente")
+    st.title("🔬 Laser Prospects — Intelligent Prospecting")
 
 with col_logo:
     logo_path = "LOGOS AMPLITUDE/Amplitude_RVB.png"
@@ -1742,23 +1664,23 @@ with col_logo:
 col_refresh, col_info = st.columns([1, 3])
 
 with col_refresh:
-    if st.button("🔄 Rafraîchir tout"):
-        with st.spinner("Collecte en cours... (~2 min)"):
+    if st.button("🔄 Refresh All"):
+        with st.spinner("Collecting data... (~2 min)"):
             df = run_pipeline()
             st.cache_data.clear()
-        st.success(f"✅ {len(df)} prospects mis à jour !")
+        st.success(f"✅ {len(df)} prospects updated!")
         st.rerun()
 
 with col_info:
     try:
         last_modified = os.path.getmtime("leads_laser.csv")
-        last_date = datetime.fromtimestamp(last_modified).strftime("%d/%m/%Y à %H:%M")
-        st.caption(f"Dernière mise à jour : {last_date}")
+        last_date = datetime.fromtimestamp(last_modified).strftime("%d/%m/%Y at %H:%M")
+        st.caption(f"Last updated: {last_date}")
     except Exception:
-        st.caption("Dernière mise à jour : inconnue")
+        st.caption("Last updated: unknown")
 
 if not os.path.exists("leads_laser.csv"):
-    st.warning("⚠️ Pas de données. Clique sur Rafraîchir.")
+    st.warning("⚠️ No data. Click Refresh All.")
     st.stop()
 
 df = load_data()
@@ -1775,53 +1697,53 @@ df_ukri = df[df["source"] == "UKRI"].copy()
 df_europe_uk = pd.concat([df_europe, df_ukri, df_erc], ignore_index=True)
 
 tab_usa, tab_europe, tab_ted, tab_canada = st.tabs([
-    "🇺🇸 Interface USA (NSF + NIH)",
-    f"🇪🇺 Interface Europe — CORDIS + UKRI + ERC ({len(df_europe_uk)})",
-    "📋 Interface Europe — Appels d'offres (TED)",
+    "🇺🇸 USA (NSF + NIH)",
+    f"🇪🇺 Europe — CORDIS + UKRI + ERC ({len(df_europe_uk)})",
+    "📋 Europe — Tenders (TED)",
     f"🍁 Canada — NSERC + CIHR ({len(df_canada)})",
 ])
 
 with tab_usa:
-    st.markdown("# 🇺🇸 Interface USA — NSF + NIH")
+    st.markdown("# 🇺🇸 USA — NSF + NIH")
     st.markdown("---")
     _col_usa_btn, _ = st.columns([1, 4])
     with _col_usa_btn:
-        if st.button("🇺🇸 Rafraîchir USA", key="btn_usa_tab"):
-            with st.spinner("Collecte NSF + NIH en cours... (~1 min)"):
+        if st.button("🇺🇸 Refresh USA", key="btn_usa_tab"):
+            with st.spinner("Collecting NSF + NIH... (~1 min)"):
                 refresh_usa_only()
                 st.cache_data.clear()
-            st.success("✅ USA mis à jour !")
+            st.success("✅ USA updated!")
             st.rerun()
 
     render_prospect_interface(
         df_base=df_usa,
-        interface_name="Interface USA — NSF + NIH",
+        interface_name="USA — NSF + NIH",
         chat_key="chat_history_usa",
         export_name="prospects_usa_export.csv"
     )
 
 with tab_europe:
-    st.markdown("# 🇪🇺 Interface Europe — CORDIS + UKRI + ERC")
+    st.markdown("# 🇪🇺 Europe — CORDIS + UKRI + ERC")
     st.markdown("---")
     _col_eu_btn, _ = st.columns([1, 4])
     with _col_eu_btn:
-        if st.button("🇪🇺 Rafraîchir Europe", key="btn_europe_tab"):
-            with st.spinner("Collecte CORDIS + UKRI en cours... (~2 min)"):
+        if st.button("🇪🇺 Refresh Europe", key="btn_europe_tab"):
+            with st.spinner("Collecting CORDIS + UKRI... (~2 min)"):
                 refresh_europe_only()
                 st.cache_data.clear()
-            st.success("✅ Europe mis à jour !")
+            st.success("✅ Europe updated!")
             st.rerun()
 
     ERC_DASHBOARD_URL = "https://dashboard.tech.ec.europa.eu/qs_digit_dashboard_mt/public/sense/app/c140622a-87e0-412e-8b29-9b5ddd857e13/sheet/61a0bd1d-cd6d-4ac8-8b55-80d8661e44c0/state/analysis"
 
-    with st.expander("📥 Importer / mettre à jour les données ERC", expanded=df_erc.empty):
+    with st.expander("📥 Import / update ERC data", expanded=df_erc.empty):
         st.markdown(
-            f"**1.** Ouvre le dashboard ERC : [Dashboard ERC — Projets financés & évalués]({ERC_DASHBOARD_URL})  \n"
-            "**2.** Exporte en Excel (icône téléchargement en haut à droite du tableau)  \n"
-            "**3.** Uploade le fichier ci-dessous"
+            f"**1.** Open the ERC dashboard: [ERC Dashboard — Funded & Evaluated Projects]({ERC_DASHBOARD_URL})  \n"
+            "**2.** Export to Excel (download icon in the top-right corner of the table)  \n"
+            "**3.** Upload the file below"
         )
 
-        uploaded = st.file_uploader("Fichier ERC (CSV ou Excel)", type=["csv", "xlsx", "xls"], key="erc_upload")
+        uploaded = st.file_uploader("ERC file (CSV or Excel)", type=["csv", "xlsx", "xls"], key="erc_upload")
 
         if uploaded:
             try:
@@ -1830,7 +1752,7 @@ with tab_europe:
                 else:
                     df_erc_raw = pd.read_excel(uploaded)
 
-                st.caption(f"Colonnes détectées : {list(df_erc_raw.columns)}")
+                st.caption(f"Detected columns: {list(df_erc_raw.columns)}")
 
                 def _find_col(df, *keywords):
                     for kw in keywords:
@@ -1847,7 +1769,7 @@ with tab_europe:
                 col_contact = _find_col(df_erc_raw, "pi ", "principal", "investigator", "researcher")
                 col_end     = _find_col(df_erc_raw, "end", "duration")
                 col_link    = _find_col(df_erc_raw, "url", "link", "cordis", "doi")
-                st.caption(f"Mapping → titre:`{col_title}` | org:`{col_org}` | pays:`{col_country}` | **budget:`{col_budget}`** | desc:`{col_desc}`")
+                st.caption(f"Mapping → title:`{col_title}` | org:`{col_org}` | country:`{col_country}` | **budget:`{col_budget}`** | desc:`{col_desc}`")
 
                 rows_erc = []
                 for _, row in df_erc_raw.iterrows():
@@ -1873,10 +1795,10 @@ with tab_europe:
                 df_erc_import = pd.DataFrame(rows_erc)
                 df_erc_import = df_erc_import[df_erc_import["score"] >= SCORE_MIN_FILTER]
 
-                st.success(f"**{len(df_erc_import)} projets ERC** correspondent aux mots-clés.")
+                st.success(f"**{len(df_erc_import)} ERC projects** match the keywords.")
                 st.dataframe(df_erc_import[["title", "organization", "country", "budget_eur", "score"]].head(10))
 
-                if st.button("✅ Intégrer dans la base", key="erc_import_btn"):
+                if st.button("✅ Add to database", key="erc_import_btn"):
                     if os.path.exists("leads_laser.csv"):
                         df_existing = pd.read_csv("leads_laser.csv")
                         df_existing = df_existing[df_existing["source"] != "ERC"]
@@ -1887,15 +1809,15 @@ with tab_europe:
                     df_total = df_total.drop_duplicates(subset=["title"], keep="first")
                     df_total.to_csv("leads_laser.csv", index=False)
                     st.cache_data.clear()
-                    st.success("✅ Données ERC intégrées !")
+                    st.success("✅ ERC data imported!")
                     st.rerun()
 
             except Exception as e:
-                st.error(f"Erreur lecture fichier : {e}")
+                st.error(f"File read error: {e}")
 
     render_prospect_interface(
         df_base=df_europe_uk,
-        interface_name="Interface Europe — CORDIS + UKRI + ERC",
+        interface_name="Europe — CORDIS + UKRI + ERC",
         chat_key="chat_history_europe",
         export_name="prospects_europe_export.csv",
         show_budget_email=True,
@@ -1906,48 +1828,63 @@ with tab_europe:
     )
 
 with tab_ted:
-    st.markdown("# 📋 Interface Europe — Appels d'offres TED")
+    st.markdown("# 📋 Europe — TED Tenders")
     st.markdown("---")
-    _col_ted_btn, _ = st.columns([1, 4])
+    _col_ted_btn, _col_ted_radio = st.columns([1, 3])
     with _col_ted_btn:
-        if st.button("📋 Rafraîchir TED", key="btn_ted_tab"):
-            with st.spinner("Collecte TED en cours... (~10 sec)"):
+        if st.button("📋 Refresh TED", key="btn_ted_tab"):
+            with st.spinner("Collecting TED... (~10 sec)"):
                 refresh_ted_only()
                 st.cache_data.clear()
-            st.success("✅ TED mis à jour !")
+            st.success("✅ TED updated!")
             st.rerun()
+    with _col_ted_radio:
+        ted_status_filter = st.radio(
+            "Call status",
+            ["All", "Open only", "Awarded only"],
+            horizontal=True,
+            key="ted_status_radio"
+        )
+
+    df_ted_display = df_ted.copy()
+    if "notice_status" in df_ted_display.columns:
+        if ted_status_filter == "Open only":
+            df_ted_display = df_ted_display[df_ted_display["notice_status"] == "Ouvert"]
+        elif ted_status_filter == "Awarded only":
+            df_ted_display = df_ted_display[df_ted_display["notice_status"] == "Attribué"]
 
     render_prospect_interface(
-        df_base=df_ted,
-        interface_name="Interface Europe — Appels d'offres TED",
+        df_base=df_ted_display,
+        interface_name="Europe — TED Tenders",
         chat_key="chat_history_ted",
         export_name="prospects_ted_export.csv",
         show_budget_email=True,
         budget_col="budget_eur",
         budget_symbol="€",
-        show_country_chart=True
+        show_country_chart=True,
+        show_notice_status=True
     )
 
 
 with tab_canada:
-    st.markdown("# 🍁 Interface Canada — NSERC + CIHR")
+    st.markdown("# 🍁 Canada — NSERC + CIHR")
     st.markdown("---")
     _col_canada_btn, _ = st.columns([1, 4])
     with _col_canada_btn:
-        if st.button("🍁 Rafraîchir Canada", key="btn_canada_tab"):
-            with st.spinner("Collecte NSERC + CIHR en cours... (~1 min)"):
+        if st.button("🍁 Refresh Canada", key="btn_canada_tab"):
+            with st.spinner("Collecting NSERC + CIHR... (~1 min)"):
                 refresh_nserc_only()
                 refresh_cihr_only()
                 st.cache_data.clear()
-            st.success("✅ Canada mis à jour !")
+            st.success("✅ Canada updated!")
             st.rerun()
 
     if df_canada.empty:
-        st.info("Aucune donnée. Clique sur **🍁 Rafraîchir Canada** pour collecter les projets canadiens.")
+        st.info("No data. Click **🍁 Refresh Canada** to collect Canadian projects.")
     else:
         render_prospect_interface(
             df_base=df_canada,
-            interface_name="Interface Canada — NSERC + CIHR",
+            interface_name="Canada — NSERC + CIHR",
             chat_key="chat_history_canada",
             export_name="prospects_canada_export.csv",
             show_budget_email=True,
